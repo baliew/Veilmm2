@@ -1,0 +1,989 @@
+--[[
+    ╔══════════════════════════════════════════════════════════════╗
+    ║                  VEIL  ·  Murder Mystery 2                   ║
+    ║        WindUI Edition  ·  Hitbox Expander & Aim              ║
+    ╚══════════════════════════════════════════════════════════════╝
+]]
+
+-- ═══ SERVICES ═══
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UIS = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+-- ═══ STATE ═══
+local State = {
+    RoleESPEnabled = true,
+    SheriffAimEnabled = true,
+    MurdererSafetyEnabled = false,
+    HitboxExpanderEnabled = true,
+    HitboxSize = 15,
+    RMBDown = false,
+    Minimized = false,
+    ActiveTab = "Combat",
+    IsEvading = false,
+    SavedMapCFrame = nil,
+    LastEvadeTime = 0,
+}
+
+-- ═══ WIND UI PALETTE ═══
+local C = {
+    Bg = Color3.fromRGB(14, 14, 18),
+    Sidebar = Color3.fromRGB(18, 18, 24),
+    Surface = Color3.fromRGB(22, 22, 30),
+    Card = Color3.fromRGB(28, 28, 38),
+    Border = Color3.fromRGB(42, 42, 56),
+    AccentRed = Color3.fromRGB(235, 45, 70),
+    AccentBlue = Color3.fromRGB(70, 130, 240),
+    AccentGreen = Color3.fromRGB(40, 200, 120),
+    AccentYellow = Color3.fromRGB(245, 175, 40),
+    AccentOrange = Color3.fromRGB(235, 125, 45),
+    AccentCyan = Color3.fromRGB(40, 210, 235),
+    TextPrimary = Color3.fromRGB(245, 245, 250),
+    TextSecondary = Color3.fromRGB(160, 160, 180),
+    TextMuted = Color3.fromRGB(100, 100, 120),
+    
+    -- Role Colors
+    MurdererRed = Color3.fromRGB(255, 35, 35),
+    SheriffBlue = Color3.fromRGB(45, 140, 255),
+    InnocentGreen = Color3.fromRGB(45, 230, 110),
+}
+
+-- ═══ UTILITY ═══
+local function tw(obj, props, dur, style)
+    return TweenService:Create(obj, TweenInfo.new(dur or 0.25, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
+end
+
+local function corner(p, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 10)
+    c.Parent = p
+    return c
+end
+
+local function stroke(p, col, th, tr)
+    local s = Instance.new("UIStroke")
+    s.Color = col or C.Border
+    s.Thickness = th or 1
+    s.Transparency = tr or 0.5
+    s.Parent = p
+    return s
+end
+
+local function pad(p, t, b, l, r)
+    local pd = Instance.new("UIPadding")
+    pd.PaddingTop = UDim.new(0, t or 8)
+    pd.PaddingBottom = UDim.new(0, b or 8)
+    pd.PaddingLeft = UDim.new(0, l or 12)
+    pd.PaddingRight = UDim.new(0, r or 12)
+    pd.Parent = p
+    return pd
+end
+
+-- ═══ SAFE TELEPORTATION ENGINE ═══
+local function safeTeleportToCFrame(targetCFrame)
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum or hum.Health <= 0 then return false end
+
+    if hrp:IsA("BasePart") then
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+    end
+
+    hrp.CFrame = targetCFrame + Vector3.new(0, 3, 0)
+    return true
+end
+
+local function findSafeLocation(locationKey)
+    if locationKey == "Lobby" then
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("BasePart") then
+                local n = obj.Name:lower()
+                if n == "lobbyspawn" or n == "lobby" or (obj:IsA("SpawnLocation") and string.match(n, "lobby")) then
+                    return obj.CFrame
+                end
+            end
+        end
+        return CFrame.new(-108, 140, 82)
+
+    elseif locationKey == "MapHighSpot" then
+        local mapFolder = workspace:FindFirstChild("Map") or workspace:FindFirstChildWhichIsA("Model")
+        if mapFolder then
+            local highestPart = nil
+            local maxH = -9999
+            for _, obj in ipairs(mapFolder:GetDescendants()) do
+                if obj:IsA("BasePart") and obj.CanCollide and not string.match(obj.Name:lower(), "lobby") then
+                    if obj.Position.Y > maxH and obj.Position.Y < 300 then
+                        maxH = obj.Position.Y
+                        highestPart = obj
+                    end
+                end
+            end
+            if highestPart then
+                return highestPart.CFrame
+            end
+        end
+
+    elseif locationKey == "DroppedGun" then
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("BasePart") and (obj.Name == "GunDrop" or string.match(obj.Name:lower(), "gundrop")) then
+                return obj.CFrame
+            end
+        end
+    end
+
+    return nil
+end
+
+-- ═══ CLEANUP ═══
+if LocalPlayer.PlayerGui:FindFirstChild("VeilWindUI") then
+    LocalPlayer.PlayerGui.VeilWindUI:Destroy()
+end
+
+-- ═══ GUI SETUP ═══
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "VeilWindUI"
+Gui.ResetOnSpawn = false
+Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+Gui.IgnoreGuiInset = true
+Gui.Parent = LocalPlayer.PlayerGui
+
+-- Main Wind Window Frame (500 x 380)
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.new(0, 500, 0, 380)
+Main.Position = UDim2.new(0.5, -250, 0.5, -190)
+Main.BackgroundColor3 = C.Bg
+Main.BackgroundTransparency = 0.05
+Main.BorderSizePixel = 0
+Main.ClipsDescendants = true
+Main.ZIndex = 1
+Main.Parent = Gui
+corner(Main, 12)
+stroke(Main, C.Border, 1, 0.4)
+
+-- Drop Shadow
+local shadow = Instance.new("ImageLabel")
+shadow.Name = "Shadow"
+shadow.BackgroundTransparency = 1
+shadow.Image = "rbxassetid://5554236805"
+shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+shadow.ImageTransparency = 0.4
+shadow.ScaleType = Enum.ScaleType.Slice
+shadow.SliceCenter = Rect.new(23,23,277,277)
+shadow.Size = UDim2.new(1, 50, 1, 50)
+shadow.Position = UDim2.new(0, -25, 0, -25)
+shadow.ZIndex = 0
+shadow.Parent = Main
+
+-- ═══ SIDEBAR NAVIGATION (Left 145px) ═══
+local Sidebar = Instance.new("Frame")
+Sidebar.Name = "Sidebar"
+Sidebar.Size = UDim2.new(0, 145, 1, 0)
+Sidebar.BackgroundColor3 = C.Sidebar
+Sidebar.BorderSizePixel = 0
+Sidebar.ZIndex = 2
+Sidebar.Parent = Main
+
+local sidebarDiv = Instance.new("Frame")
+sidebarDiv.Size = UDim2.new(0, 1, 1, 0)
+sidebarDiv.Position = UDim2.new(1, -1, 0, 0)
+sidebarDiv.BackgroundColor3 = C.Border
+sidebarDiv.BackgroundTransparency = 0.5
+sidebarDiv.BorderSizePixel = 0
+sidebarDiv.ZIndex = 3
+sidebarDiv.Parent = Sidebar
+
+-- Logo Header
+local LogoFrame = Instance.new("Frame")
+LogoFrame.Size = UDim2.new(1, 0, 0, 54)
+LogoFrame.BackgroundTransparency = 1
+LogoFrame.ZIndex = 3
+LogoFrame.Parent = Sidebar
+
+local logoTxt = Instance.new("TextLabel")
+logoTxt.Size = UDim2.new(1, -20, 0, 22)
+logoTxt.Position = UDim2.new(0, 16, 0, 14)
+logoTxt.BackgroundTransparency = 1
+logoTxt.Text = "VEIL"
+logoTxt.TextColor3 = C.AccentRed
+logoTxt.TextSize = 18
+logoTxt.Font = Enum.Font.GothamBlack
+logoTxt.TextXAlignment = Enum.TextXAlignment.Left
+logoTxt.ZIndex = 3
+logoTxt.Parent = LogoFrame
+
+local subLogo = Instance.new("TextLabel")
+subLogo.Size = UDim2.new(1, -20, 0, 14)
+subLogo.Position = UDim2.new(0, 16, 0, 34)
+subLogo.BackgroundTransparency = 1
+subLogo.Text = "MM2 v7.0"
+subLogo.TextColor3 = C.TextMuted
+subLogo.TextSize = 10
+subLogo.Font = Enum.Font.Gotham
+subLogo.TextXAlignment = Enum.TextXAlignment.Left
+subLogo.ZIndex = 3
+subLogo.Parent = LogoFrame
+
+-- Sidebar Tab Buttons Container
+local TabContainer = Instance.new("Frame")
+TabContainer.Size = UDim2.new(1, 0, 1, -60)
+TabContainer.Position = UDim2.new(0, 0, 0, 60)
+TabContainer.BackgroundTransparency = 1
+TabContainer.ZIndex = 3
+TabContainer.Parent = Sidebar
+
+local tabLayout = Instance.new("UIListLayout")
+tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+tabLayout.Padding = UDim.new(0, 6)
+tabLayout.Parent = TabContainer
+pad(TabContainer, 0, 0, 10, 10)
+
+-- ═══ RIGHT HEADER & PAGE CONTAINER ═══
+local HeaderBar = Instance.new("Frame")
+HeaderBar.Name = "HeaderBar"
+HeaderBar.Size = UDim2.new(1, -145, 0, 46)
+HeaderBar.Position = UDim2.new(0, 145, 0, 0)
+HeaderBar.BackgroundTransparency = 1
+HeaderBar.ZIndex = 2
+HeaderBar.Parent = Main
+
+local pageTitle = Instance.new("TextLabel")
+pageTitle.Size = UDim2.new(1, -90, 1, 0)
+pageTitle.Position = UDim2.new(0, 16, 0, 0)
+pageTitle.BackgroundTransparency = 1
+pageTitle.Text = "Combat Settings"
+pageTitle.TextColor3 = C.TextPrimary
+pageTitle.TextSize = 15
+pageTitle.Font = Enum.Font.GothamBold
+pageTitle.TextXAlignment = Enum.TextXAlignment.Left
+pageTitle.ZIndex = 3
+pageTitle.Parent = HeaderBar
+
+-- Min / Close Buttons
+local function makeHeaderBtn(txt, posX, col)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, 26, 0, 26)
+    b.Position = UDim2.new(1, posX, 0.5, -13)
+    b.BackgroundColor3 = col or C.Surface
+    b.BackgroundTransparency = 0.4
+    b.Text = txt
+    b.TextColor3 = C.TextSecondary
+    b.TextSize = 12
+    b.Font = Enum.Font.GothamBold
+    b.BorderSizePixel = 0
+    b.ZIndex = 4
+    b.Parent = HeaderBar
+    corner(b, 6)
+    b.MouseEnter:Connect(function() tw(b, {BackgroundTransparency = 0.1, TextColor3 = C.TextPrimary}, 0.15):Play() end)
+    b.MouseLeave:Connect(function() tw(b, {BackgroundTransparency = 0.4, TextColor3 = C.TextSecondary}, 0.15):Play() end)
+    return b
+end
+
+local MinBtn = makeHeaderBtn("—", -66, C.Surface)
+local CloseBtn = makeHeaderBtn("✕", -32, Color3.fromRGB(200, 35, 50))
+
+local PageContainer = Instance.new("Frame")
+PageContainer.Size = UDim2.new(1, -145, 1, -46)
+PageContainer.Position = UDim2.new(0, 145, 0, 46)
+PageContainer.BackgroundTransparency = 1
+PageContainer.ZIndex = 2
+PageContainer.Parent = Main
+
+local pages = {}
+
+local function createPage(name)
+    local p = Instance.new("ScrollingFrame")
+    p.Name = name .. "Page"
+    p.Size = UDim2.new(1, 0, 1, 0)
+    p.BackgroundTransparency = 1
+    p.BorderSizePixel = 0
+    p.ScrollBarThickness = 4
+    p.ScrollBarImageColor3 = C.AccentRed
+    p.ScrollBarImageTransparency = 0.4
+    p.CanvasSize = UDim2.new(0, 0, 0, 0)
+    p.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    p.Visible = false
+    p.ZIndex = 3
+    p.Parent = PageContainer
+
+    local l = Instance.new("UIListLayout")
+    l.SortOrder = Enum.SortOrder.LayoutOrder
+    l.Padding = UDim.new(0, 10)
+    l.Parent = p
+    pad(p, 4, 12, 14, 14)
+
+    pages[name] = p
+    return p
+end
+
+local CombatPage = createPage("Combat")
+local VisualsPage = createPage("Visuals")
+local TeleportPage = createPage("Teleport")
+local SettingsPage = createPage("Settings")
+
+CombatPage.Visible = true
+
+-- Wind UI Component Builders
+local function createSectionHeader(parent, text, icon, order)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 20)
+    f.BackgroundTransparency = 1
+    f.LayoutOrder = order
+    f.ZIndex = 3
+    f.Parent = parent
+    
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, 0, 1, 0)
+    l.BackgroundTransparency = 1
+    l.Text = (icon or "") .. "  " .. text:upper()
+    l.TextColor3 = C.TextMuted
+    l.TextSize = 10
+    l.Font = Enum.Font.GothamBlack
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.ZIndex = 3
+    l.Parent = f
+    return f
+end
+
+local function createToggle(parent, title, subTextStr, order, defOn, accent)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 56)
+    row.BackgroundColor3 = C.Surface
+    row.BackgroundTransparency = 0.2
+    row.BorderSizePixel = 0
+    row.LayoutOrder = order
+    row.ZIndex = 3
+    row.Parent = parent
+    corner(row, 8)
+    stroke(row, C.Border, 1, 0.6)
+
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -64, 0, 20)
+    l.Position = UDim2.new(0, 12, 0, 8)
+    l.BackgroundTransparency = 1
+    l.Text = title
+    l.TextColor3 = C.TextPrimary
+    l.TextSize = 13
+    l.Font = Enum.Font.GothamSemibold
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.ZIndex = 3
+    l.Parent = row
+
+    local sub = Instance.new("TextLabel")
+    sub.Size = UDim2.new(1, -64, 0, 16)
+    sub.Position = UDim2.new(0, 12, 0, 28)
+    sub.BackgroundTransparency = 1
+    sub.Text = subTextStr or ""
+    sub.TextColor3 = C.TextMuted
+    sub.TextSize = 10
+    sub.Font = Enum.Font.Gotham
+    sub.TextXAlignment = Enum.TextXAlignment.Left
+    sub.ZIndex = 3
+    sub.Parent = row
+
+    local bg = Instance.new("Frame")
+    bg.Size = UDim2.new(0, 44, 0, 22)
+    bg.Position = UDim2.new(1, -54, 0.5, -11)
+    bg.BackgroundColor3 = defOn and (accent or C.AccentRed) or Color3.fromRGB(40, 40, 52)
+    bg.BorderSizePixel = 0
+    bg.ZIndex = 3
+    bg.Parent = row
+    corner(bg, 11)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 18, 0, 18)
+    knob.Position = defOn and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
+    knob.BackgroundColor3 = Color3.new(1, 1, 1)
+    knob.BorderSizePixel = 0
+    knob.ZIndex = 4
+    knob.Parent = bg
+    corner(knob, 9)
+
+    local isOn = defOn or false
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 1, 0)
+    btn.BackgroundTransparency = 1
+    btn.Text = ""
+    btn.ZIndex = 5
+    btn.Parent = row
+
+    local function set(v)
+        isOn = v
+        tw(bg, {BackgroundColor3 = isOn and (accent or C.AccentRed) or Color3.fromRGB(40, 40, 52)}, 0.25):Play()
+        tw(knob, {Position = isOn and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}, 0.25):Play()
+    end
+
+    btn.MouseButton1Click:Connect(function()
+        isOn = not isOn
+        set(isOn)
+    end)
+
+    return row, btn, set
+end
+
+-- ═══ COMBAT PAGE CONTENT ═══
+createSectionHeader(CombatPage, "Sheriff & Defensive Features", "⚔️", 0)
+
+local _, aimToggleBtn, setAimToggle = createToggle(CombatPage, "Sheriff Aim Assist", "Hold Right Click with Gun to lock camera onto Murderer", 1, State.SheriffAimEnabled, C.AccentBlue)
+
+local _, hitboxToggleBtn, setHitboxToggle = createToggle(CombatPage, "Murderer Hitbox Expander", "Expands Murderer into a 15x15 box for easy gun shots", 2, State.HitboxExpanderEnabled, C.AccentCyan)
+
+local _, safetyToggleBtn, setSafetyToggle = createToggle(CombatPage, "Murderer Safety (Auto-Evade)", "Evades to Lobby if Murderer gets <18 studs, returning when safe", 3, State.MurdererSafetyEnabled, C.AccentOrange)
+
+local tipCard = Instance.new("Frame")
+tipCard.Size = UDim2.new(1, 0, 0, 68)
+tipCard.BackgroundColor3 = C.Surface
+tipCard.BackgroundTransparency = 0.3
+tipCard.BorderSizePixel = 0
+tipCard.LayoutOrder = 4
+tipCard.ZIndex = 3
+tipCard.Parent = CombatPage
+corner(tipCard, 8)
+stroke(tipCard, C.Border, 1, 0.5)
+
+local tipText = Instance.new("TextLabel")
+tipText.Size = UDim2.new(1, -20, 1, -10)
+tipText.Position = UDim2.new(0, 10, 0, 5)
+tipText.BackgroundTransparency = 1
+tipText.Text = "🎯 HITBOX EXPANDER: Expands the Murderer's torso into a 15x15 ForceField box. Shooting anywhere inside the box counts as a direct hit!"
+tipText.TextColor3 = C.TextSecondary
+tipText.TextSize = 11
+tipText.Font = Enum.Font.Gotham
+tipText.TextWrapped = true
+tipText.TextXAlignment = Enum.TextXAlignment.Left
+tipText.ZIndex = 4
+tipText.Parent = tipCard
+
+-- ═══ VISUALS PAGE CONTENT ═══
+createSectionHeader(VisualsPage, "Role Highlights", "👁️", 0)
+
+local _, espToggleBtn, setESPToggle = createToggle(VisualsPage, "Role ESP & Overhead Tags", "Highlights Murderer (Red), Sheriff (Blue), Innocent (Green)", 1, State.RoleESPEnabled, C.AccentRed)
+
+createSectionHeader(VisualsPage, "Role Indicators Legend", "🛡️", 10)
+
+local legendCard = Instance.new("Frame")
+legendCard.Size = UDim2.new(1, 0, 0, 80)
+legendCard.BackgroundColor3 = C.Surface
+legendCard.BackgroundTransparency = 0.2
+legendCard.BorderSizePixel = 0
+legendCard.LayoutOrder = 11
+legendCard.ZIndex = 3
+legendCard.Parent = VisualsPage
+corner(legendCard, 8)
+stroke(legendCard, C.Border, 1, 0.6)
+
+local function makeLegendItem(title, color, posX, posY)
+    local dot = Instance.new("Frame")
+    dot.Size = UDim2.new(0, 10, 0, 10)
+    dot.Position = UDim2.new(posX, 12, posY, 8)
+    dot.BackgroundColor3 = color
+    dot.BorderSizePixel = 0
+    dot.ZIndex = 4
+    dot.Parent = legendCard
+    corner(dot, 5)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0.48, -24, 0, 20)
+    lbl.Position = UDim2.new(posX, 28, posY, 3)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = title
+    lbl.TextColor3 = C.TextPrimary
+    lbl.TextSize = 11
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.ZIndex = 4
+    lbl.Parent = legendCard
+end
+
+makeLegendItem("Murderer (Knife)", C.MurdererRed, 0, 0.1)
+makeLegendItem("Sheriff (Gun)", C.SheriffBlue, 0.5, 0.1)
+makeLegendItem("Innocent (None)", C.InnocentGreen, 0, 0.52)
+
+-- ═══ TELEPORT PAGE CONTENT ═══
+createSectionHeader(TeleportPage, "Safe Location Teleports", "📍", 0)
+
+local teleCard = Instance.new("Frame")
+teleCard.Size = UDim2.new(1, 0, 0, 120)
+teleCard.BackgroundColor3 = C.Surface
+teleCard.BackgroundTransparency = 0.2
+teleCard.BorderSizePixel = 0
+teleCard.LayoutOrder = 1
+teleCard.ZIndex = 3
+teleCard.Parent = TeleportPage
+corner(teleCard, 8)
+stroke(teleCard, C.Border, 1, 0.6)
+
+local teleDesc = Instance.new("TextLabel")
+teleDesc.Size = UDim2.new(1, -20, 0, 24)
+teleDesc.Position = UDim2.new(0, 10, 0, 6)
+teleDesc.BackgroundTransparency = 1
+teleDesc.Text = "Click any location to teleport safely (No void clipping):"
+teleDesc.TextColor3 = C.TextSecondary
+teleDesc.TextSize = 11
+teleDesc.Font = Enum.Font.Gotham
+teleDesc.TextXAlignment = Enum.TextXAlignment.Left
+teleDesc.ZIndex = 4
+teleDesc.Parent = teleCard
+
+local function createTeleportBtn(parent, btnText, locationKey, posX, posY, accentColor)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0.31, -4, 0, 36)
+    b.Position = UDim2.new(posX, 8, posY, 36)
+    b.BackgroundColor3 = C.Card
+    b.BorderSizePixel = 0
+    b.Text = btnText
+    b.TextColor3 = C.TextPrimary
+    b.TextSize = 11
+    b.Font = Enum.Font.GothamBold
+    b.ZIndex = 4
+    b.Parent = parent
+    corner(b, 6)
+    stroke(b, accentColor or C.Border, 1, 0.5)
+
+    b.MouseEnter:Connect(function()
+        tw(b, {BackgroundColor3 = accentColor or C.AccentRed}, 0.15):Play()
+    end)
+    b.MouseLeave:Connect(function()
+        tw(b, {BackgroundColor3 = C.Card}, 0.15):Play()
+    end)
+
+    b.MouseButton1Click:Connect(function()
+        local cf = findSafeLocation(locationKey)
+        if cf then
+            local success = safeTeleportToCFrame(cf)
+            if success then
+                b.Text = "✓ Teleported!"
+                task.wait(1)
+                b.Text = btnText
+            end
+        else
+            b.Text = "✕ Not Found"
+            task.wait(1)
+            b.Text = btnText
+        end
+    end)
+end
+
+createTeleportBtn(teleCard, "🏠 Lobby", "Lobby", 0, 0.35, C.AccentGreen)
+createTeleportBtn(teleCard, "⛰️ Map High", "MapHighSpot", 0.33, 0.35, C.AccentYellow)
+createTeleportBtn(teleCard, "🔫 Get Gun", "DroppedGun", 0.66, 0.35, C.AccentBlue)
+
+-- ═══ SETTINGS PAGE CONTENT ═══
+createSectionHeader(SettingsPage, "Information", "⚙️", 0)
+
+local settingsCard = Instance.new("Frame")
+settingsCard.Size = UDim2.new(1, 0, 0, 90)
+settingsCard.BackgroundColor3 = C.Surface
+settingsCard.BackgroundTransparency = 0.2
+settingsCard.BorderSizePixel = 0
+settingsCard.LayoutOrder = 1
+settingsCard.ZIndex = 3
+settingsCard.Parent = SettingsPage
+corner(settingsCard, 8)
+stroke(settingsCard, C.Border, 1, 0.6)
+
+local sInfo = Instance.new("TextLabel")
+sInfo.Size = UDim2.new(1, -20, 1, -10)
+sInfo.Position = UDim2.new(0, 10, 0, 5)
+sInfo.BackgroundTransparency = 1
+sInfo.Text = "VEIL · Murder Mystery 2 WindUI Edition v7.0\n\nIncludes Murderer Hitbox Expander (15x15 ForceField), Auto-Evade, and Dual ESP."
+sInfo.TextColor3 = C.TextSecondary
+sInfo.TextSize = 11
+sInfo.Font = Enum.Font.Gotham
+sInfo.TextWrapped = true
+sInfo.TextXAlignment = Enum.TextXAlignment.Left
+sInfo.ZIndex = 4
+sInfo.Parent = settingsCard
+
+-- ═══ TAB BUTTON CREATION SYSTEM ═══
+local tabTitleMap = {
+    Combat = "Combat Settings",
+    Visuals = "Visuals & ESP",
+    Teleport = "Location Teleportation",
+    Settings = "System Settings",
+}
+
+local function createTabBtn(name, icon, tabId, order)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 36)
+    btn.BackgroundColor3 = (tabId == State.ActiveTab) and C.Surface or C.Sidebar
+    btn.BackgroundTransparency = (tabId == State.ActiveTab) and 0 or 1
+    btn.BorderSizePixel = 0
+    btn.LayoutOrder = order
+    btn.Text = ""
+    btn.ZIndex = 4
+    btn.Parent = TabContainer
+    corner(btn, 6)
+
+    local txt = Instance.new("TextLabel")
+    txt.Size = UDim2.new(1, -16, 1, 0)
+    txt.Position = UDim2.new(0, 12, 0, 0)
+    txt.BackgroundTransparency = 1
+    txt.Text = (icon or "") .. "  " .. name
+    txt.TextColor3 = (tabId == State.ActiveTab) and C.TextPrimary or C.TextSecondary
+    txt.TextSize = 12
+    txt.Font = Enum.Font.GothamSemibold
+    txt.TextXAlignment = Enum.TextXAlignment.Left
+    txt.ZIndex = 5
+    txt.Parent = btn
+
+    btn.MouseButton1Click:Connect(function()
+        State.ActiveTab = tabId
+        pageTitle.Text = tabTitleMap[tabId] or name
+
+        for pName, pageObj in pairs(pages) do
+            pageObj.Visible = (pName == tabId)
+        end
+
+        for _, child in ipairs(TabContainer:GetChildren()) do
+            if child:IsA("TextButton") then
+                tw(child, {BackgroundTransparency = 1, BackgroundColor3 = C.Sidebar}, 0.2):Play()
+                local tLabel = child:FindFirstChildOfClass("TextLabel")
+                if tLabel then tw(tLabel, {TextColor3 = C.TextSecondary}, 0.2):Play() end
+            end
+        end
+        tw(btn, {BackgroundTransparency = 0, BackgroundColor3 = C.Surface}, 0.2):Play()
+        tw(txt, {TextColor3 = C.TextPrimary}, 0.2):Play()
+    end)
+    return btn
+end
+
+createTabBtn("Combat", "⚔️", "Combat", 1)
+createTabBtn("Visuals", "👁️", "Visuals", 2)
+createTabBtn("Teleport", "📍", "Teleport", 3)
+createTabBtn("Settings", "⚙️", "Settings", 4)
+
+-- ═══ FRAME DRAGGING ═══
+local dragging = false
+local dragStart, startPos
+
+Sidebar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = Main.Position
+    end
+end)
+
+HeaderBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = Main.Position
+    end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+    end
+end)
+
+-- ═══ MINIMIZE / CLOSE ═══
+local fullSize = UDim2.new(0, 500, 0, 370)
+local miniSize = UDim2.new(0, 500, 0, 46)
+MinBtn.MouseButton1Click:Connect(function()
+    State.Minimized = not State.Minimized
+    tw(Main, {Size = State.Minimized and miniSize or fullSize}, 0.3):Play()
+    MinBtn.Text = State.Minimized and "+" or "—"
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    State.RoleESPEnabled = false
+    State.SheriffAimEnabled = false
+    State.MurdererSafetyEnabled = false
+    State.HitboxExpanderEnabled = false
+    
+    -- Reset murderer hitbox
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Character then
+            local mHRP = plr.Character:FindFirstChild("HumanoidRootPart")
+            if mHRP and mHRP:IsA("BasePart") and mHRP.Size.X > 5 then
+                mHRP.Size = Vector3.new(2, 2, 1)
+                mHRP.Transparency = 1
+            end
+            local hl = plr.Character:FindFirstChild("VeilRoleESP")
+            if hl then hl:Destroy() end
+            local bb = plr.Character:FindFirstChild("VeilOverheadTag")
+            if bb then bb:Destroy() end
+        end
+    end
+    local t = tw(Main, {Size = UDim2.new(0, 500, 0, 0), BackgroundTransparency = 1}, 0.3)
+    t:Play()
+    t.Completed:Connect(function() Gui:Destroy() end)
+end)
+
+espToggleBtn.MouseButton1Click:Connect(function()
+    State.RoleESPEnabled = not State.RoleESPEnabled
+    setESPToggle(State.RoleESPEnabled)
+end)
+
+aimToggleBtn.MouseButton1Click:Connect(function()
+    State.SheriffAimEnabled = not State.SheriffAimEnabled
+    setAimToggle(State.SheriffAimEnabled)
+end)
+
+hitboxToggleBtn.MouseButton1Click:Connect(function()
+    State.HitboxExpanderEnabled = not State.HitboxExpanderEnabled
+    setHitboxToggle(State.HitboxExpanderEnabled)
+end)
+
+safetyToggleBtn.MouseButton1Click:Connect(function()
+    State.MurdererSafetyEnabled = not State.MurdererSafetyEnabled
+    setSafetyToggle(State.MurdererSafetyEnabled)
+end)
+
+-- ═══ RMB INPUT TRACKING ═══
+UIS.InputBegan:Connect(function(input, processed)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        State.RMBDown = true
+    end
+end)
+
+UIS.InputEnded:Connect(function(input, processed)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        State.RMBDown = false
+    end
+end)
+
+-- ═══ ROLE & WEAPON DETECTION ═══
+local function getPlayerRole(plr)
+    if not plr then return "Innocent" end
+    local hasKnife = false
+    local hasGun = false
+    
+    local backpack = plr:FindFirstChildOfClass("Backpack")
+    if backpack then
+        for _, tool in ipairs(backpack:GetChildren()) do
+            if tool:IsA("Tool") then
+                local tName = tool.Name:lower()
+                if tName == "knife" or string.match(tName, "knife") or tool:FindFirstChild("KnifeServer") or tool:FindFirstChild("Knife") or string.match(tName, "blade") then
+                    hasKnife = true
+                elseif tName == "gun" or string.match(tName, "gun") or string.match(tName, "revolver") or tool:FindFirstChild("GunServer") or string.match(tName, "pistol") then
+                    hasGun = true
+                end
+            end
+        end
+    end
+    
+    local char = plr.Character
+    if char then
+        for _, tool in ipairs(char:GetChildren()) do
+            if tool:IsA("Tool") then
+                local tName = tool.Name:lower()
+                if tName == "knife" or string.match(tName, "knife") or tool:FindFirstChild("KnifeServer") or tool:FindFirstChild("Knife") or string.match(tName, "blade") then
+                    hasKnife = true
+                elseif tName == "gun" or string.match(tName, "gun") or string.match(tName, "revolver") or tool:FindFirstChild("GunServer") or string.match(tName, "pistol") then
+                    hasGun = true
+                end
+            end
+        end
+    end
+    
+    if hasKnife then return "Murderer"
+    elseif hasGun then return "Sheriff"
+    else return "Innocent" end
+end
+
+local function getMurderer()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("Humanoid") and plr.Character.Humanoid.Health > 0 then
+            if getPlayerRole(plr) == "Murderer" then
+                return plr
+            end
+        end
+    end
+    return nil
+end
+
+local function isMurdererHoldingKnife(mPlr)
+    if not mPlr or not mPlr.Character then return false end
+    for _, child in ipairs(mPlr.Character:GetChildren()) do
+        if child:IsA("Tool") then
+            local tName = child.Name:lower()
+            if tName == "knife" or string.match(tName, "knife") or child:FindFirstChild("KnifeServer") or string.match(tName, "blade") then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function isHoldingGun()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    for _, child in ipairs(char:GetChildren()) do
+        if child:IsA("Tool") then
+            local tName = child.Name:lower()
+            if tName == "gun" or string.match(tName, "gun") or string.match(tName, "revolver") or child:FindFirstChild("GunServer") then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- ═══ MAIN LOOP (HITBOX EXPANDER, ESP, AIM & SAFETY) ═══
+RunService.RenderStepped:Connect(function()
+    local myChar = LocalPlayer.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
+    local murderer = getMurderer()
+
+    -- 1. Murderer Hitbox Expander
+    if State.HitboxExpanderEnabled and murderer and murderer.Character then
+        local mHRP = murderer.Character:FindFirstChild("HumanoidRootPart")
+        if mHRP and mHRP:IsA("BasePart") then
+            mHRP.Size = Vector3.new(State.HitboxSize, State.HitboxSize, State.HitboxSize)
+            mHRP.Transparency = 0.7
+            mHRP.Color = C.MurdererRed
+            mHRP.Material = Enum.Material.ForceField
+            mHRP.CanCollide = false
+        end
+    elseif not State.HitboxExpanderEnabled and murderer and murderer.Character then
+        local mHRP = murderer.Character:FindFirstChild("HumanoidRootPart")
+        if mHRP and mHRP:IsA("BasePart") and mHRP.Size.X > 5 then
+            mHRP.Size = Vector3.new(2, 2, 1)
+            mHRP.Transparency = 1
+        end
+    end
+
+    -- 2. Sheriff Aim Assist Camera Lock
+    if State.SheriffAimEnabled and State.RMBDown and isHoldingGun() then
+        if murderer and murderer.Character then
+            local mHRP = murderer.Character:FindFirstChild("Head") or murderer.Character:FindFirstChild("HumanoidRootPart")
+            if mHRP then
+                local cam = workspace.CurrentCamera
+                if cam then
+                    cam.CFrame = CFrame.new(cam.CFrame.Position, mHRP.Position)
+                end
+            end
+        end
+    end
+
+    -- 3. Murderer Safety (Auto-Evade & Return)
+    if State.MurdererSafetyEnabled and myHRP and myHum and myHum.Health > 0 and murderer and murderer.Character then
+        local mHRP = murderer.Character:FindFirstChild("HumanoidRootPart")
+        if mHRP then
+            local dist = (myHRP.Position - mHRP.Position).Magnitude
+            local holdingKnife = isMurdererHoldingKnife(murderer)
+
+            if not State.IsEvading then
+                if dist < 18 and holdingKnife and (tick() - State.LastEvadeTime > 4) then
+                    State.IsEvading = true
+                    State.LastEvadeTime = tick()
+                    State.SavedMapCFrame = myHRP.CFrame
+
+                    local lobbyCF = findSafeLocation("Lobby")
+                    if lobbyCF then
+                        safeTeleportToCFrame(lobbyCF)
+                    end
+                end
+            else
+                local mDistToSaved = (mHRP.Position - State.SavedMapCFrame.Position).Magnitude
+                local isSafeNow = (mDistToSaved > 40) or not holdingKnife or (murderer.Character.Humanoid.Health <= 0)
+
+                if isSafeNow and (tick() - State.LastEvadeTime > 3) then
+                    State.IsEvading = false
+                    safeTeleportToCFrame(State.SavedMapCFrame)
+                end
+            end
+        end
+    end
+
+    -- 4. Role ESP & Overhead Tags System
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local char = plr.Character
+            local head = char:FindFirstChild("Head")
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            
+            if State.RoleESPEnabled and head then
+                local role = getPlayerRole(plr)
+                local targetColor = C.InnocentGreen
+                local roleTitle = "INNOCENT"
+                
+                if role == "Murderer" then
+                    targetColor = C.MurdererRed
+                    roleTitle = "🔪 MURDERER"
+                elseif role == "Sheriff" then
+                    targetColor = C.SheriffBlue
+                    roleTitle = "🔫 SHERIFF"
+                else
+                    roleTitle = "😇 INNOCENT"
+                end
+
+                local distStr = ""
+                if hrp and myHRP then
+                    distStr = " [" .. math.floor((hrp.Position - myHRP.Position).Magnitude) .. "m]"
+                end
+
+                -- Overhead Tag
+                local bb = char:FindFirstChild("VeilOverheadTag")
+                if not bb then
+                    bb = Instance.new("BillboardGui")
+                    bb.Name = "VeilOverheadTag"
+                    bb.Size = UDim2.new(0, 200, 0, 40)
+                    bb.StudsOffset = Vector3.new(0, 3, 0)
+                    bb.AlwaysOnTop = true
+                    bb.Adornee = head
+                    bb.Parent = char
+
+                    local tagLabel = Instance.new("TextLabel")
+                    tagLabel.Name = "TagText"
+                    tagLabel.Size = UDim2.new(1, 0, 1, 0)
+                    tagLabel.BackgroundTransparency = 1
+                    tagLabel.TextSize = 13
+                    tagLabel.Font = Enum.Font.GothamBold
+                    tagLabel.TextStrokeTransparency = 0.2
+                    tagLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+                    tagLabel.Parent = bb
+                end
+
+                local tagText = bb:FindFirstChild("TagText")
+                if tagText then
+                    tagText.Text = plr.DisplayName .. "\n" .. roleTitle .. distStr
+                    tagText.TextColor3 = targetColor
+                end
+
+                -- Highlight Body Chams
+                local hl = char:FindFirstChild("VeilRoleESP")
+                if not hl then
+                    hl = Instance.new("Highlight")
+                    hl.Name = "VeilRoleESP"
+                    hl.FillTransparency = 0.35
+                    hl.OutlineTransparency = 0.05
+                    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                    hl.Adornee = char
+                    hl.Parent = char
+                end
+
+                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                hl.FillColor = targetColor
+                hl.OutlineColor = targetColor
+                hl.Enabled = true
+
+            else
+                local hl = char:FindFirstChild("VeilRoleESP")
+                if hl then hl:Destroy() end
+                
+                local bb = char:FindFirstChild("VeilOverheadTag")
+                if bb then bb:Destroy() end
+            end
+        end
+    end
+end)
+
+print("✨ Veil MM2 WindUI v7.0 with Murderer Hitbox Expander Loaded Successfully!")
